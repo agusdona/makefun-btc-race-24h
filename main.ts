@@ -1,4 +1,4 @@
-// BTC race bot: long-only trend follower on CBBTC/USDC 1-minute bars.
+// BTC race bot, round 2: quick-profit trend rider on CBBTC/USDC 1-minute bars.
 //
 // Protocol: agent-fun/bars-replay/v1. The harness sends one hello, then one
 // batch per bar that closed, and this bot answers every batch with exactly
@@ -6,20 +6,26 @@
 // bar's open, so every signal here is computed on the bar close just sent.
 //
 // Strategy (all numbers in the README):
-//   - EMA(12) and EMA(48) over bar closes, seeded as the mean of their first
+//   - EMA(9) and EMA(48) over bar closes, seeded as the mean of their first
 //     span of closes (the kit baselines' convention).
-//   - Entry: the close is >= 20 bps above EMA(12) while EMA(12) is above
-//     EMA(48). A confirmed uptrend only; the 20 bps filter is ~4x the dev
-//     window's 1-minute noise, which keeps the bot out of the chop that
-//     sank every kit baseline (EMA-cross lost ~$96 on 68 whipsaw trades).
-//   - Exit, whichever comes first: EMA(12) crosses back below EMA(48),
-//     take-profit +1.0% over the fill price, stop-loss -0.5%, or a trailing
-//     stop 1.0% below the highest close since entry (0.5% proved too tight:
-//     it fired on 1-minute noise 11 bars after entry on the dev window).
+//   - Entry: the close is >= 30 bps above EMA(9) while EMA(9) is above
+//     EMA(48). A confirmed uptrend only; the 30 bps filter is ~6x the dev
+//     window's 1-minute noise (5 bps stdev), which keeps the bot out of the
+//     chop that sank every kit baseline (EMA-cross lost ~$96 on 68 whipsaw
+//     trades; RSI-Bollinger lost ~$47; ADX-momentum lost ~$53).
+//   - Exit, whichever comes first: EMA(9) crosses back below EMA(48),
+//     take-profit +0.5% over the fill price, stop-loss -1.0%, or a trailing
+//     stop 1.0% below the highest close since entry. The 0.5% take-profit is
+//     the point: on the dev window the catchable up-moves run 50-160 bps, and
+//     taking 50 bps twice (two round trips, +$10.00) beats waiting for 100
+//     bps once (+$7.71). The trailing stop never fired on the dev window; it
+//     only guards a real reversal in the race.
 //   - One open position at most, full cash per entry. A round trip costs
 //     ~26-28 bps (4 bps fee + 2 bps slippage + ~8 bps impact each way), so
 //     only a real trend clears it; the bot would rather sit in cash than
-//     bleed in a downtrend (the dev window falls -2.3% overall).
+//     bleed in a downtrend (the dev window falls -2.3% overall, and its
+//     second half has no 60-minute up-window above 50 bps at all — the bot
+//     makes exactly $0 there by staying flat).
 //
 // Determinism: pure float64 arithmetic on the bars, no clock, no
 // environment, no unseeded randomness. The same hello + batches always
@@ -29,19 +35,15 @@
 import { runBars, type Bar, type BarsState, type Batch, type BuyInput, type OrderInput, type SellInput } from './vendor/makefun-bars.ts';
 
 const SYMBOL = 'CBBTC';
-const FAST_SPAN = 12;
+const FAST_SPAN = 9;
 const SLOW_SPAN = 48;
 /** Entry needs the close this far above the fast EMA, in bps. */
-const ENTRY_GAP_BPS = 20;
+const ENTRY_GAP_BPS = 30;
 /** Take-profit over the fill price, as a fraction. */
-const TAKE_PROFIT = 0.01;
+const TAKE_PROFIT = 0.005;
 /** Stop-loss under the fill price, as a fraction. */
-const STOP_LOSS = 0.005;
-/** Trailing stop under the highest close since entry, as a fraction.
- * 1.0%: the 0.5% first tried fired on ordinary 1-minute noise 11 bars
- * after entry (grade-local: PnL -$2.27, 4 trades) — the dev window's
- * opening hour alone ranges 125 bps. 1.0% never fires on the dev window
- * (same +$7.71 as no trail) and only guards a real reversal in the race. */
+const STOP_LOSS = 0.01;
+/** Trailing stop under the highest close since entry, as a fraction. */
 const TRAIL = 0.01;
 /** Max slippage vs the latest close, in bps (1%: far above any 1-minute move on the dev window). */
 const MAX_SLIPPAGE_BPS = 100;
@@ -55,7 +57,7 @@ interface Ema {
 
 const fast: Ema = { span: FAST_SPAN, warm: [], value: null };
 const slow: Ema = { span: SLOW_SPAN, warm: [], value: null };
-/** EMA(12) - EMA(48) after the previous bar, in bps of the slow EMA; null until both are seeded. */
+/** EMA(9) - EMA(48) after the previous bar, in bps of the slow EMA; null until both are seeded. */
 let prevGapBps: number | null = null;
 /** Fill price of the open position (price-scale units), from the batch fills; null while flat. */
 let entryPrice: number | null = null;
@@ -112,7 +114,7 @@ await runBars({
         orders.push(sell);
       }
     } else if (held === undefined && !state.warmingUp) {
-      // Flat: enter only on a confirmed uptrend — close 20 bps above the
+      // Flat: enter only on a confirmed uptrend — close 30 bps above the
       // fast EMA while the fast EMA is above the slow one.
       const strongTrend = gapBps > 0 && close > fast.value * (1 + ENTRY_GAP_BPS / 10_000);
       if (strongTrend) {
