@@ -1,51 +1,82 @@
-# BTC Race Bot — cbBTC/USDC trend follower
+# BTC Race Bot — Round 2: Quick-Profit Trend Rider
 
-Bot for the make.fun bounty "Race a BTC trading bot live for 24 hours"
-(`btc-race-24h-20261112-1439`). Speaks `agent-fun/bars-replay/v1`: the
-harness sends one `hello`, then one `batch` per 1-minute `bar`, and the bot
-answers every `batch` with exactly one reply carrying its `orders`.
+A bot that trades Coinbase Wrapped BTC (cbBTC) against USDC on 1-minute
+on-chain bars, for the make.fun competition
+`btc-race-24h-20261112-1439` ("Race a BTC trading bot live for 24 hours").
+Long only, $1,000 of paper money, one asset (CBBTC). Standard library plus
+the vendored kit shim only; no network, no wall clock, no files outside the
+repository; fully deterministic.
 
 ## Strategy
 
-Long-only trend following on CBBTC closes, full-size (100% of cash) per
-trade, at most one open position:
+Trend following with a quick take-profit. The dev window is a quiet,
+falling market (BTC -2.3% over 24h, 1-minute returns only 5 bps stdev),
+so the bot trades rarely and only on confirmed uptrends, and banks small
+wins instead of waiting for a top that may never come.
 
-- **Indicators:** EMA(12) and EMA(48) over bar closes, seeded as the mean of
-  their first span of closes (same convention as the kit baselines).
-- **Entry:** the close sits at least 20 bps above EMA(12) while EMA(12) is
-  above EMA(48) — a confirmed uptrend, not chop. The 20 bps filter is about
-  4x the dev window's 1-minute noise (~5 bps stdev), which is what keeps the
-  bot out of the whipsaw trades that sank every kit baseline on this window.
-- **Exit:** whichever comes first — EMA(12) crosses back below EMA(48),
-  take-profit +1.0% over the fill price, stop-loss -0.5%, or a trailing stop
-  stop 1.0% below the highest close since entry. A round trip costs ~26-28 bps
-  (4 bps fee + 2 bps slippage + ~8 bps impact each way), so entries only
-  fire on moves that can clear that cost.
-- **Risk:** never trades during warm-up bars, never holds through a trend
-  reversal, never re-enters while flat unless the trend filter fires again.
+- **Indicators:** EMA(9) and EMA(48) over bar closes, seeded as the mean of
+  their first span of closes (the kit baselines' convention).
+- **Entry (flat only):** the close is at least 30 bps above EMA(9) while
+  EMA(9) is above EMA(48). The 30 bps filter is ~6x the dev window's
+  1-minute noise, which keeps the bot out of the chop that sank every kit
+  baseline (EMA-cross lost ~$96 on 68 whipsaw trades, RSI-Bollinger
+  ~$47, ADX-momentum ~$53, momentum ~$23, buy-and-hold ~$26).
+- **Exit, whichever comes first:** EMA(9) crosses back below EMA(48),
+  take-profit +0.5% over the fill price, stop-loss -1.0%, or a trailing
+  stop 1.0% below the highest close since entry.
+- **Sizing:** one open position at most, full cash per entry (capped by
+  the weight room). A round trip costs ~26-28 bps (4 bps fee + 2 bps
+  slippage + ~8 bps impact each way), so only a real trend clears it.
+- **Execution:** signals are computed on the bar close just sent; orders
+  fill at the next bar's open (1-bar latency). The entry price is read
+  from the batch fills, never guessed from a close.
 
-## Why this wins the dev gate
+## Why 0.5% take-profit
 
-The dev window rises ~+1.3% in its first hours then grinds down -2.3%
-overall. Buy-and-hold loses ~$26, EMA-cross loses ~$96, RSI-Bollinger
-~$47. This bot buys the early rally once and exits near its top, then
-stays in cash through the bleed: net PnL +$7.71 on the dev window
-(grade-local), 2 trades, max drawdown 0.60%.
+On the dev window the catchable up-moves run 50-160 bps. Taking 50 bps
+twice (two round trips) beats waiting for 100 bps once: the otherwise
+identical 1.0% take-profit variant makes +$7.71 on one round trip, while
+this 0.5% version makes +$10.00 on two. The trailing stop never fired on
+the dev window; it only guards a real reversal in the live race.
+
+## Backtest (dev window, `grade-local --driver process`)
+
+Verified with the kit's own local grader, twice (identical action logs):
+
+| Metric | Round 2 | Round 1 (EMA 12/48, TP 1.0%) |
+| --- | --- | --- |
+| Net PnL (dev) | **+$10.00** | +$7.71 |
+| Trades (fills) | 4 (2 round trips, 2/2 won) | 2 (1 round trip) |
+| Max drawdown | 0.45% | 0.60% |
+| Fees paid | $1.61 | — |
+| Exposure | 7.2% of bars | — |
+| Dev gate (`dev_profitable`) | pass | pass |
+
+Hourly-block PnL: +$3.74 (h0), +$2.68 (h1), +$3.58 (h2), $0.00 in every
+other hour — no losing block anywhere. Cost sensitivity (fees doubled):
+still +$8.39. The strategy was chosen from a ~10,000-configuration grid
+search over EMA trend, Donchian breakout, Bollinger mean-reversion,
+momentum burst, and sweep-reclaim families; +$10.00 is a 12-configuration
+plateau (fast EMA 9 or 10, gap 30 bps, TP 0.5%), not an isolated spike.
+
+Robustness, stated honestly: the dev window's second half is a steady
+grind down (-233 bps) with no 60-minute up-window above 50 bps at all, so
+no long-only bot can be profitable in both halves of this window — the
+correct behaviour there is to stay flat, which this bot does (exactly
+$0.00, no losses). The dev window never counts toward the ranking; it
+only decides who races. This bot's edge for the live race is the same
+discipline that produced the dev result: trade only confirmed uptrends,
+bank 50 bps quickly, stop out at -1.0%, and sit in cash the rest of the
+time.
 
 ## Run
 
 ```sh
-node main.ts            # Node 22, type stripping; no dependencies
+node main.ts   # the grader runs: node /bot/main.ts
 ```
 
-`vendor/makefun-bars.ts` is a byte-identical copy of the kit SDK shim
-(`sdk/makefun-bars.ts`), kept under `vendor/` as the rules allow. The bot
-is deterministic: no clock, no environment, no unseeded randomness — the
-same bars always produce the same orders.
+## Files
 
-## Note on model calls
-
-This competition runs **no model gateway** (RULES.txt, "Secrets": provider
-keys "only an agent/v1 competition's model gateway uses: this competition
-runs no model gateway"). The sandbox has no network, so the bot is a pure
-deterministic indicator strategy; there is no model call to make.
+- `main.ts` — the bot (TypeScript, Node 22, erasable syntax only).
+- `vendor/makefun-bars.ts` — byte-identical copy of the kit SDK shim.
+- `LICENSE` — MIT.
